@@ -5,7 +5,6 @@ import {promises as fs} from 'fs'
 import fetch from 'node-fetch'
 import { exec } from 'child_process'
 import {platform, release} from 'os'
-import WS from 'ws'
 
 import Decoder from '../Binary/Decoder'
 import { MessageType, HKDFInfoKeys, MessageOptions, WAChat, WAMessageContent, BaileysError, WAMessageProto, TimedOutError, CancelledError } from './Constants'
@@ -115,44 +114,6 @@ export async function promiseTimeout<T>(ms: number, promise: (resolve: (v?: T)=>
     .finally (cancel)
     return p as Promise<T>
 }
-
-export const openWebSocketConnection = (timeoutMs: number, retryOnNetworkError: boolean) => {
-    const newWS = async () => {
-        const conn = new WS('wss://web.whatsapp.com/ws', null, { origin: 'https://web.whatsapp.com', timeout: timeoutMs })
-        await new Promise ((resolve, reject) => {
-            conn.on('open', () => {
-                conn.removeAllListeners ('error')
-                conn.removeAllListeners ('close')
-                conn.removeAllListeners ('open')
-
-                resolve ()
-            })
-            // if there was an error in the WebSocket
-            conn.on('error', reject)
-            conn.on('close', () => reject(new Error('close')))
-        })
-        return conn
-    } 
-    let cancelled = false
-    const connect = async () => {
-        while (!cancelled) {
-            try {
-                const ws = await newWS()
-                if (cancelled) {
-                    ws.terminate ()
-                    break
-                } else return ws
-            } catch (error) {
-                if (!retryOnNetworkError) throw error 
-                await delay (1000)
-            }
-        }
-        throw CancelledError()
-    }
-    const cancel = () => cancelled = true
-    return { ws: connect(), cancel }
-}
-
 // whatsapp requires a message tag for every message, we just use the timestamp as one
 export function generateMessageTag(epoch?: number) {
     let tag = unixTimestampSeconds().toString()
@@ -169,53 +130,52 @@ export function generateMessageID() {
 }
 export function decryptWA (message: string | Buffer, macKey: Buffer, encKey: Buffer, decoder: Decoder, fromMe: boolean=false): [string, Object, [number, number]?] {
     let commaIndex = message.indexOf(',') // all whatsapp messages have a tag and a comma, followed by the actual message
-    
     if (commaIndex < 0) throw Error ('invalid message: ' + message) // if there was no comma, then this message must be not be valid
     
     if (message[commaIndex+1] === ',') commaIndex += 1
     let data = message.slice(commaIndex+1, message.length)
+    
     // get the message tag.
     // If a query was done, the server will respond with the same message tag we sent the query with
     const messageTag: string = message.slice(0, commaIndex).toString()
-    if (data.length === 0) {
-        // got an empty message, usually get one after sending a query with the 128 tag
-        return 
-    }
-
     let json
-    let tags = null
-    if (typeof data === 'string') {
-        json = JSON.parse(data) // parse the JSON
-    } else {
-        if (!macKey || !encKey) {
-            console.warn ('recieved encrypted buffer when auth creds unavailable: ' + message)
-            return
-        }
-        /* 
-            If the data recieved was not a JSON, then it must be an encrypted message.
-            Such a message can only be decrypted if we're connected successfully to the servers & have encryption keys
-        */
-        if (fromMe) {
-            tags = [data[0], data[1]]
-            data = data.slice(2, data.length)
-        }
-        
-        const checksum = data.slice(0, 32) // the first 32 bytes of the buffer are the HMAC sign of the message
-        data = data.slice(32, data.length) // the actual message
-        const computedChecksum = hmacSign(data, macKey) // compute the sign of the message we recieved using our macKey
-        
-        if (!checksum.equals(computedChecksum)) {
-            console.error (`
-                Checksums don't match:
-                og: ${checksum.toString('hex')}
-                computed: ${computedChecksum.toString('hex')}
-                message: ${message.slice(0, 80).toString()}
-            `)
-            return
-        }
-        // the checksum the server sent, must match the one we computed for the message to be valid
-        const decrypted = aesDecrypt(data, encKey) // decrypt using AES
-        json = decoder.read(decrypted) // decode the binary message into a JSON array
+    let tags
+    if (data.length > 0) {
+        if (typeof data === 'string') {
+            json = JSON.parse(data) // parse the JSON
+        } else {
+            if (!macKey || !encKey) {
+                console.warn ('recieved encrypted buffer when auth creds unavailable: ' + message)
+                return
+            }
+            /* 
+                If the data recieved was not a JSON, then it must be an encrypted message.
+                Such a message can only be decrypted if we're connected successfully to the servers & have encryption keys
+            */
+            if (fromMe) {
+                tags = [data[0], data[1]]
+                data = data.slice(2, data.length)
+            }
+            
+            const checksum = data.slice(0, 32) // the first 32 bytes of the buffer are the HMAC sign of the message
+            data = data.slice(32, data.length) // the actual message
+            const computedChecksum = hmacSign(data, macKey) // compute the sign of the message we recieved using our macKey
+            
+            if (checksum.equals(computedChecksum)) {
+                // the checksum the server sent, must match the one we computed for the message to be valid
+                const decrypted = aesDecrypt(data, encKey) // decrypt using AES
+                json = decoder.read(decrypted) // decode the binary message into a JSON array
+            } else {
+                console.error (`
+                    Checksums don't match:
+                    og: ${checksum.toString('hex')}
+                    computed: ${computedChecksum.toString('hex')}
+                    data: ${data.slice(0, 80).toString()}
+                    tag: ${messageTag}
+                    message: ${message.slice(0, 80).toString()}
+                `)
+            }
+        }   
     }
     return [messageTag, json, tags]
 }

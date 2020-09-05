@@ -94,6 +94,10 @@ describe ('Reconnects', () => {
             reason !== DisconnectReason.intentional && assert.fail ('should not have closed again')
         ))
         await delay (60*1000)
+
+        const status = await conn.getStatus ()
+        assert.ok (status)
+
         conn.close ()
     }
     /**
@@ -235,9 +239,17 @@ describe ('Pending Requests', () => {
 
         conn.close ()
 
+        const result0 = await conn.connect ()
+        assert.deepEqual (result0.updatedChats, {})
+
+        conn.close ()
+
         const oldChat = conn.chats.all()[0]
         oldChat.archive = 'true' // mark the first chat as archived
         oldChat.modify_tag = '1234' // change modify tag to detect change
+
+        // close the socket after a few seconds second to see if updates are correct after a reconnect
+        setTimeout (() => conn['conn'].close(), 5000) 
 
         const result = await conn.connect ()
         assert.ok (!result.newConnection)
@@ -248,11 +260,13 @@ describe ('Pending Requests', () => {
         assert.ok ('archive' in chat)
         assert.equal (Object.keys(chat).length, 2)
 
+        assert.equal (Object.keys(result.updatedChats).length, 1)
+
         conn.close ()
     })
     it('should queue requests when closed', async () => {
           const conn = new WAConnection ()
-          conn.pendingRequestTimeoutMs = null
+          //conn.pendingRequestTimeoutMs = null
 
           await conn.loadAuthInfo('./auth_info.json').connect ()
           

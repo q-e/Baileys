@@ -2,6 +2,8 @@ import * as Utils from './Utils'
 import { WAMessage, WAChat, MessageLogLevel, WANode, KEEP_ALIVE_INTERVAL_MS, BaileysError, WAConnectOptions, DisconnectReason, UNAUTHORIZED_CODES, WAContact, TimedOutError, CancelledError, WAOpenResult } from './Constants'
 import {WAConnection as Base} from './1.Validation'
 import Decoder from '../Binary/Decoder'
+import WS from 'ws'
+import KeyedDB from '@adiwajshing/keyed-db'
 
 export class WAConnection extends Base {
     /** Connect to WhatsApp Web */
@@ -62,48 +64,44 @@ export class WAConnection extends Base {
         // actual connect
         const connect = () => {
             const timeoutMs = options?.timeoutMs || 60*1000
-            
-            const { ws, cancel } = Utils.openWebSocketConnection (5000, false)
+            let task = Utils.promiseTimeout(timeoutMs, (resolve, reject) => {
+                // determine whether reconnect should be used or not
+                const shouldUseReconnect = this.lastDisconnectReason !== DisconnectReason.replaced && 
+                                            this.lastDisconnectReason !== DisconnectReason.unknown &&
+                                            this.lastDisconnectReason !== DisconnectReason.intentional && 
+                                            this.user?.jid
+                
+                const reconnectID = shouldUseReconnect ? this.user.jid.replace ('@s.whatsapp.net', '@c.us') : null
 
-            let task: Promise<void | { [k: string]: Partial<WAChat> }> = ws
-                    .then (conn => this.conn = conn)
+                this.conn = new WS('wss://web.whatsapp.com/ws', null, { origin: 'https://web.whatsapp.com', timeout: timeoutMs })
+                this.conn.on('message', data => this.onMessageRecieved(data as any))
+
+                this.conn.on ('open', () => {
+                    this.log(`connected to WhatsApp Web server, authenticating via ${reconnectID ? 'reconnect' : 'takeover'}`, MessageLogLevel.info)
+                    
+                    this.authenticate(reconnectID)
+                    .then (resolve)
                     .then (() => (
-                        this.conn.on('message', data => this.onMessageRecieved(data as any))
-                    ))
-                    .then (() => (
-                        this.log(`connected to WhatsApp Web server, authenticating via ${reconnectID ? 'reconnect' : 'takeover'}`, MessageLogLevel.info)
-                    ))
-                    .then (() => this.authenticate(reconnectID))
-                    .then (() => {
                         this.conn
                         .removeAllListeners ('error')
                         .removeAllListeners ('close')
-                    })
+                    ))
+                    .catch (reject)
+                })
+                this.conn.on('error', reject)
+                this.conn.on('close', () => reject(new Error('close')))
+            })
 
-            let cancelTask: () => void
+            let cancel: () => void
             if (typeof options?.waitForChats === 'undefined' ? true : options?.waitForChats) {
                 const {waitForChats, cancelChats} = this.receiveChatsAndContacts()
-                
                 task = Promise.all ([task, waitForChats]).then (([_, updates]) => updates)
-                cancelTask = () => { cancelChats(); cancel() }
-            } else cancelTask = cancel
+                cancel = cancelChats
+            }
+            
+            task = task as Promise<void | { [k: string]: Partial<WAChat> }>
 
-            // determine whether reconnect should be used or not
-            const shouldUseReconnect = this.lastDisconnectReason !== DisconnectReason.replaced && 
-                                       this.lastDisconnectReason !== DisconnectReason.unknown &&
-                                       this.lastDisconnectReason !== DisconnectReason.intentional && 
-                                       this.user?.jid
-            const reconnectID = shouldUseReconnect ? this.user.jid.replace ('@s.whatsapp.net', '@c.us') : null
-
-            const promise = Utils.promiseTimeout(timeoutMs, (resolve, reject) => (
-                task.then (resolve).catch (reject)
-            ))
-            .catch (err => {
-                this.endConnection ()
-                throw err
-            }) as Promise<void | { [k: string]: Partial<WAChat> }>
-
-            return { promise, cancel: cancelTask }
+            return { promise: task, cancel }
         }
 
         let promise = Promise.resolve ()
@@ -127,6 +125,9 @@ export class WAConnection extends Base {
 
             const final = await result.promise
             return final
+        } catch (error) {
+            this.endConnection ()
+            throw error
         } finally {
             cancel()
             this.off('close', cancel)
@@ -138,10 +139,8 @@ export class WAConnection extends Base {
      * @returns [chats, contacts]
      */
     protected receiveChatsAndContacts() {
-        const oldChats: {[k: string]: WAChat} = this.chats['dict']
-
-        this.contacts = {}
-        this.chats.clear ()
+        const chats = new KeyedDB<WAChat>(Utils.waChatUniqueKey, c => c.jid)
+        const contacts = {}
 
         let receivedContacts = false
         let receivedMessages = false
@@ -168,7 +167,7 @@ export class WAConnection extends Base {
             if (messages) {
                 messages.reverse().forEach (([,, message]: ['message', null, WAMessage]) => {
                     const jid = message.key.remoteJid
-                    const chat = this.chats.get(jid)
+                    const chat = chats.get(jid)
                     chat?.messages.unshift (message)
                 })
             }
@@ -196,11 +195,9 @@ export class WAConnection extends Base {
                 chat.t = +chat.t
                 chat.count = +chat.count
                 chat.messages = []
-                
-                const oldChat = this.chats.get(chat.jid) 
-                oldChat && this.chats.delete (oldChat)
 
-                this.chats.insert (chat) // chats data (log json to see what it looks like)
+                // chats data (log json to see what it looks like)
+                !chats.get (chat.jid) && chats.insert (chat) 
             })
             
             this.log (`received ${json[2].length} chats`, MessageLogLevel.info)
@@ -219,7 +216,7 @@ export class WAConnection extends Base {
                 if (!contact) return this.log (`unexpectedly got null contact: ${type}, ${contact}`, MessageLogLevel.info)
                 
                 contact.jid = Utils.whatsappID (contact.jid)
-                this.contacts[contact.jid] = contact
+                contacts[contact.jid] = contact
             })
             this.log (`received ${json[2].length} contacts`, MessageLogLevel.info)
             checkForResolution ()
@@ -234,20 +231,26 @@ export class WAConnection extends Base {
                     cancelChats = () => reject (CancelledError())
                 })
 
+                const oldChats = this.chats
                 const updatedChats: { [k: string]: Partial<WAChat> } = {}
-                for (let chat of this.chats.all()) {
-                    const respectiveContact = this.contacts[chat.jid]
+
+                for (let chat of chats.all()) {
+                    const respectiveContact = contacts[chat.jid]
                     chat.name = respectiveContact?.name || respectiveContact?.notify || chat.name
                     
-                    if (!oldChats[chat.jid]) {
+                    const oldChat = oldChats.get(chat.jid)
+                    if (!oldChat) {
                         updatedChats[chat.jid] = chat
-                    } else if (oldChats[chat.jid].t < chat.t || oldChats[chat.jid].modify_tag !== chat.modify_tag) {
-                        const changes = Utils.shallowChanges (oldChats[chat.jid], chat)
+                    } else if (oldChat.t < chat.t || oldChat.modify_tag !== chat.modify_tag) {
+                        const changes = Utils.shallowChanges (oldChat, chat)
                         delete changes.messages
-
                         updatedChats[chat.jid] = changes
                     }
                 }
+
+                this.chats = chats 
+                this.contacts = contacts
+
                 return updatedChats
             } finally {
                 deregisterCallbacks ()
@@ -266,10 +269,8 @@ export class WAConnection extends Base {
             this.lastSeen = new Date(parseInt(timestamp))
             this.emit ('received-pong')
         } else {
-            const decrypted = Utils.decryptWA (message, this.authInfo?.macKey, this.authInfo?.encKey, new Decoder())
-            if (!decrypted) return
-            
-            const [messageTag, json] = decrypted
+            const [messageTag, json] = Utils.decryptWA (message, this.authInfo?.macKey, this.authInfo?.encKey, new Decoder())
+            if (!json) return
 
             if (this.logLevel === MessageLogLevel.all) {
                 this.log(messageTag + ', ' + JSON.stringify(json), MessageLogLevel.all)
