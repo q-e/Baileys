@@ -25,6 +25,8 @@ const message = config.message
 const adminIds = config.adminIds
 const adminPhones = config.adminPhones
 const groupName = config.groupName
+const gs_groupId = config.gs_groupId
+const gs_waGroupId = config.gs_waGroupId
 const cohortId = 2
 const processMax = 1
 
@@ -51,7 +53,7 @@ async function sendMessage() {
             cleanupSendMessage()
             throw error;
         }
-        //console.log('affected ' + results.affectedRows + ' rows');
+        console.log('affected ' + results.affectedRows + ' rows');
         sm2_pickUser(results.insertId)
     });    
 }
@@ -92,7 +94,7 @@ function sm22_userCohort(messageId, userId, cellNum) {
 }
 
 async function sm3_createGroup(messageId, userId, cellNum) {
-    //console.log('in createGroup: ', userId, cellNum)
+    //console.log('in createGroup: ', messageId, userId, cellNum)
 
     // add the 3 users, 1 + 2 admins
     let users = [cellNum]
@@ -100,7 +102,15 @@ async function sm3_createGroup(messageId, userId, cellNum) {
     users = users.map(user => convertPhoneToWAUserId(user))
     //console.log('creating group with users: ', users)
     
-    const group = await waConnection.groupCreate(groupName, users)
+    // instead of creating a new one, first see if one already exists with the desired group name and users
+    let group
+    if (simulation) {
+        sm4_addUserGroups(messageId, userId, gs_waGroupId, gs_groupId)
+        return
+    }
+    console.log('creating WA group')
+    group = await waConnection.groupCreate(groupName, users)
+    console.log('created WA group')
     const query = "insert ignore into `groups` (name, wa_id) values (?, ?)"
     sqlConnection.query(query, [groupName, group.gid], function(error, results, fields) {
         if (error) {
@@ -108,12 +118,12 @@ async function sm3_createGroup(messageId, userId, cellNum) {
             throw error;
         }
         //console.log('affected ' + results.affectedRows + ' rows');
-        sm4_addUserGroups(messageId, userId, group, results.insertId)
+        sm4_addUserGroups(messageId, userId, group.gid, results.insertId)
     });
 }
 
-function sm4_addUserGroups(messageId, userId, waGroup, groupId) {
-    //console.log('in sm4_addUserGroups: ', waGroup, groupId)
+function sm4_addUserGroups(messageId, userId, waGroupId, groupId) {
+    //console.log('in sm4_addUserGroups: ', waGroupId, groupId)
 
     let query = `insert ignore into user_group (user_id, group_id) values (${userId}, ${groupId})`
     adminIds.forEach(adminId => query += `, (${adminId}, ${groupId})`)
@@ -124,19 +134,26 @@ function sm4_addUserGroups(messageId, userId, waGroup, groupId) {
             throw error;
         }
         //console.log('affected ' + results.affectedRows + ' rows');
-        sm5_addUserMessages(messageId, userId, waGroup)
+        sm5_addUserMessages(messageId, userId, waGroupId, groupId)
     });
 }
 
-function sm5_addUserMessages(messageId, userId, waGroup) {
-    const query = `insert ignore into user_message (user_id, message_id) values (${userId}, ${messageId})`
+function sm5_addUserMessages(messageId, userId, waGroupId, groupId) {
+    //console.log('in addUserMessage', userId, messageId)
+    let query
+    if (messageId == 0) {
+        query = `insert ignore into user_message (sent_time, user_id, group_id, message_id) values (now(), ${userId}, ${groupId}, (select id from messages where content = "${message}" and cohort_id = ${cohortId})) on duplicate key update sent_time = now()`
+    } else {
+        query = `insert ignore into user_message (sent_time, user_id, message_id, group_id) values (now(), ${userId}, ${messageId}, ${groupId}) on duplicate key update sent_time = now()`
+    }
+    //console.log(query)
     sqlConnection.query(query, async function(error, results, fields) {
         if (error) {
             cleanupSendMessage()
             throw error;
         }
         //console.log('affected ' + results.affectedRows + ' rows');
-        await waConnection.sendMessage(waGroup.gid, message, MessageType.text)
+        await waConnection.sendMessage(waGroupId, message, MessageType.text)
         console.log('message sent!')
     });
 }
