@@ -310,11 +310,30 @@ async function connectToWhatsApp() {
 
 }
 
+function updateMessageStatus(message) {
+    // handle case where FROM is not from a group AND TO is to a group
+    const from = message.from + ''
+    const to = message.to + ''
+    if (from.includes('@c') && to.includes('@g')) {
+        console.log('in updateMessageStatus')
+        const waGroupId = to
+        let user = message.participant
+        if (message.type == 3) {
+            const query = 'update user_message set deliver_time = now() where group_id = (select'
+    
+        }
+    
+    }    
+
+}
+
 function listen() {
     waConnection.on('message-status-update', (message) => {
-        console.log ('from/to: ', message.from, message.to)
-        console.log ('type: ', message.type)
+        console.log ('from: ', message.from)
+        console.log ('to: ', message.to, message.ids)
+        console.log ('type: ', message.type, message.participant)
     })
+    updateMessageStatus(message)
     // 3 = received
     // 4 = read
 
