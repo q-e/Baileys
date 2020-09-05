@@ -21,15 +21,16 @@ const waConnection = new WAConnection()
 // message send
 // settings moved to config.json
 
-const message = config.message
-const adminIds = config.adminIds
-const adminPhones = config.adminPhones
-const groupName = config.groupName
-const gs_groupId = config.gs_groupId
-const gs_waGroupId = config.gs_waGroupId
-const cohortId = 2
-const processMax = 1
+const g_message: string = config.message
+const g_adminIds = config.adminIds
+const g_adminPhones = config.adminPhones
+const g_groupName: string = config.groupName
+const gs_groupId: number = config.gs_groupId
+const gs_waGroupId: string = config.gs_waGroupId
+const g_cohortId: number = 2
+const g_processMax: number = 1
 
+let g_messageId: number
 
 function cleanupSendMessage() {
     console.log('FATAL: in cleanupSendMessage')
@@ -47,24 +48,25 @@ async function sendMessage() {
     // handle the fact that phone numbers are not unique: made users.cell_num unique
     // TODO: run for 2 users
 
-    const query = `insert ignore into messages (content, cohort_id) values ("${message}", ${cohortId})`
+    const query = `insert ignore into messages (content, cohort_id) values ("${g_message}", ${g_cohortId})`
     sqlConnection.query(query, function(error, results, fields) {
         if (error) {
             cleanupSendMessage()
             throw error;
         }
-        console.log('affected ' + results.affectedRows + ' rows');
-        sm2_pickUser(results.insertId)
+        //console.log('affected ' + results.affectedRows + ' rows');
+        g_messageId = results.insertId
+        sm2_pickUser()
     });    
 }
 
-function sm2_pickUser(messageId) {
-    //console.log("in pickUser: ", messageId)
+function sm2_pickUser() {
+    //console.log("in pickUser: ")
     let query
     if (simulation) {
         query = `select id, cell_num from users where is_test = 1 limit 1`
     } else {
-        query = `select id, cell_num from users where is_admin = 0 AND optout_time is null AND exists_on_wa = 1 AND id not in (select user_id from user_cohort where cohort_id = ${cohortId}) limit 1`
+        query = `select id, cell_num from users where is_admin = 0 AND optout_time is null AND exists_on_wa = 1 AND id not in (select user_id from user_cohort where cohort_id = ${g_cohortId}) limit 1`
     }
     sqlConnection.query(query, function(error, results, fields) {
         if (error) {
@@ -73,7 +75,7 @@ function sm2_pickUser(messageId) {
         }
         if (results.length > 0) {
             console.log(`picked user with id = ${results[0].id} and phone = ${results[0].cell_num}`)
-            sm22_userCohort(messageId, results[0].id, results[0].cell_num)
+            sm22_userCohort(results[0].id, results[0].cell_num)
         } else {
             console.log('ERROR in pickUser: no rows found')
             cleanupSendMessage()
@@ -81,52 +83,52 @@ function sm2_pickUser(messageId) {
     });
 }
 
-function sm22_userCohort(messageId, userId, cellNum) {
-    const query = `insert ignore into user_cohort (user_id, cohort_id) values (${userId}, ${cohortId})`
+function sm22_userCohort(userId, cellNum) {
+    const query = `insert ignore into user_cohort (user_id, cohort_id) values (${userId}, ${g_cohortId})`
     sqlConnection.query(query, function(error, results, fields) {
         if (error) {
             cleanupSendMessage()
             throw error;
         }
         //console.log('affected ' + results.affectedRows + ' rows');
-        sm3_createGroup(messageId, userId, cellNum)
+        sm3_createGroup(userId, cellNum)
     });
 }
 
-async function sm3_createGroup(messageId, userId, cellNum) {
+async function sm3_createGroup(userId, cellNum) {
     //console.log('in createGroup: ', messageId, userId, cellNum)
 
     // add the 3 users, 1 + 2 admins
     let users = [cellNum]
-    users = users.concat(adminPhones)
+    users = users.concat(g_adminPhones)
     users = users.map(user => convertPhoneToWAUserId(user))
     //console.log('creating group with users: ', users)
     
     // instead of creating a new one, first see if one already exists with the desired group name and users
     let group
     if (simulation) {
-        sm4_addUserGroups(messageId, userId, gs_waGroupId, gs_groupId)
+        sm4_addUserGroups(userId, gs_waGroupId, gs_groupId)
         return
     }
     console.log('creating WA group')
-    group = await waConnection.groupCreate(groupName, users)
+    group = await waConnection.groupCreate(g_groupName, users)
     console.log('created WA group')
     const query = "insert ignore into `groups` (name, wa_id) values (?, ?)"
-    sqlConnection.query(query, [groupName, group.gid], function(error, results, fields) {
+    sqlConnection.query(query, [g_groupName, group.gid], function(error, results, fields) {
         if (error) {
             cleanupSendMessage()
             throw error;
         }
         //console.log('affected ' + results.affectedRows + ' rows');
-        sm4_addUserGroups(messageId, userId, group.gid, results.insertId)
+        sm4_addUserGroups(userId, group.gid, results.insertId)
     });
 }
 
-function sm4_addUserGroups(messageId, userId, waGroupId, groupId) {
+function sm4_addUserGroups(userId, waGroupId, groupId) {
     //console.log('in sm4_addUserGroups: ', waGroupId, groupId)
 
     let query = `insert ignore into user_group (user_id, group_id) values (${userId}, ${groupId})`
-    adminIds.forEach(adminId => query += `, (${adminId}, ${groupId})`)
+    g_adminIds.forEach(adminId => query += `, (${adminId}, ${groupId})`)
     //console.log(query)
     sqlConnection.query(query, function(error, results, fields) {
         if (error) {
@@ -134,17 +136,17 @@ function sm4_addUserGroups(messageId, userId, waGroupId, groupId) {
             throw error;
         }
         //console.log('affected ' + results.affectedRows + ' rows');
-        sm5_addUserMessages(messageId, userId, waGroupId, groupId)
+        sm5_addUserMessages(userId, waGroupId, groupId)
     });
 }
 
-function sm5_addUserMessages(messageId, userId, waGroupId, groupId) {
+function sm5_addUserMessages(userId, waGroupId, groupId) {
     //console.log('in addUserMessage', userId, messageId)
     let query
-    if (messageId == 0) {
-        query = `insert ignore into user_message (sent_time, user_id, group_id, message_id) values (now(), ${userId}, ${groupId}, (select id from messages where content = "${message}" and cohort_id = ${cohortId})) on duplicate key update sent_time = now()`
+    if (g_messageId == 0) {
+        query = `insert ignore into user_message (sent_time, user_id, group_id, message_id) values (now(), ${userId}, ${groupId}, (select id from messages where content = "${g_message}" and cohort_id = ${g_cohortId})) on duplicate key update sent_time = now()`
     } else {
-        query = `insert ignore into user_message (sent_time, user_id, message_id, group_id) values (now(), ${userId}, ${messageId}, ${groupId}) on duplicate key update sent_time = now()`
+        query = `insert ignore into user_message (sent_time, user_id, message_id, group_id) values (now(), ${userId}, ${g_messageId}, ${groupId}) on duplicate key update sent_time = now()`
     }
     //console.log(query)
     sqlConnection.query(query, async function(error, results, fields) {
@@ -153,7 +155,7 @@ function sm5_addUserMessages(messageId, userId, waGroupId, groupId) {
             throw error;
         }
         //console.log('affected ' + results.affectedRows + ' rows');
-        await waConnection.sendMessage(waGroupId, message, MessageType.text)
+        await waConnection.sendMessage(waGroupId, g_message, MessageType.text)
         console.log('message sent!')
     });
 }
@@ -251,7 +253,7 @@ async function e1_determineMaxAndLoop() {
         if (error) throw error;
         //console.log('Returning number: ', results[0].num);
         if (results.length > 0 && results[0].num > 0) {
-            let numToProcess = Math.min(results[0].num, processMax)
+            let numToProcess = Math.min(results[0].num, g_processMax)
             console.log('*** Processing rows = ', numToProcess)
 
             for (let i = 0; i < numToProcess; i++) {
@@ -302,8 +304,8 @@ async function connectToWhatsApp() {
     // await e1_determineMaxAndLoop()
 
     // message send flow
-    for (let i = 0; i < processMax; i++) {
-        console.log('***', i+1, ' of ', processMax)
+    for (let i = 0; i < g_processMax; i++) {
+        console.log('***', i+1, ' of ', g_processMax)
         await sendMessage()
         await sleep(1000)
     }
@@ -314,17 +316,37 @@ function updateMessageStatus(message) {
     // handle case where FROM is not from a group AND TO is to a group
     const from = message.from + ''
     const to = message.to + ''
+    let user = message.participant + ''
+    user = user.replace('@c.us', '').substr(1)
+    console.log('*** from user: ', user)
     if (from.includes('@c') && to.includes('@g')) {
         console.log('in updateMessageStatus')
         const waGroupId = to
-        let user = message.participant
+        let field: string
         if (message.type == 3) {
-            const query = 'update user_message set deliver_time = now() where group_id = (select'
-    
+            field = 'deliver_time'
+        } else if (message.type == 4) {
+            field = 'read_time'
+        } else {
+            return
         }
-    
-    }    
 
+        let query: string
+        if (g_messageId == 0) {
+            query = `update user_message set ${field} = now() where message_id in (select id from messages where content = "${g_message}" and cohort_id = ${g_cohortId}) AND user_id in (select id from users where normalized_cell = "${user}")`
+        } else {
+            query = `update user_message set ${field} = now() where message_id = ${g_messageId} AND user_id in (select id from users where normalized_cell = "${user}")`
+        }    
+        console.log(query)
+        sqlConnection.query(query, function(error, results, fields) {
+            if (error) {
+                cleanupSendMessage()
+                throw error;
+            }
+            console.log('affected ' + results.affectedRows + ' rows');
+        });
+        
+    }
 }
 
 function listen() {
@@ -332,10 +354,8 @@ function listen() {
         console.log ('from: ', message.from)
         console.log ('to: ', message.to, message.ids)
         console.log ('type: ', message.type, message.participant)
+        updateMessageStatus(message)
     })
-    updateMessageStatus(message)
-    // 3 = received
-    // 4 = read
 
     // no way to differentiate between user exiting themselves and admin removing them
     // we will assume user quit
