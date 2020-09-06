@@ -22,13 +22,13 @@ const waConnection = new WAConnection()
 const g_simulation: boolean = config.simulation
 const g_message: string = config.message
 const g_adminIds = config.adminIds
-const g_adminPhones = config.adminPhones
+const g_adminPhones = config.adminPhones   // TODO, remove this, read from db
 const g_groupName: string = config.groupName
 const g_cohortId: number = config.cohortId
 const g_processMax: number = config.processMax
 const g_sleepMs : number = config.sleepMs
 
-// simulation only
+// simulation only - UNUSED
 const gs_groupId: number = config.groupId
 const gs_waGroupId: string = config.waGroupId
 
@@ -108,10 +108,10 @@ async function sm3_createGroup(userId, cellNum) {
     
     // instead of creating a new one, first see if one already exists with the desired group name and users
     let group
-    if (g_simulation) {
-        sm4_addUserGroups(userId, gs_waGroupId, gs_groupId)
-        return
-    }
+    // if (g_simulation) {
+    //     sm4_addUserGroups(userId, gs_waGroupId, gs_groupId)
+    //     return
+    // }
     //console.log('creating WA group')
     group = await waConnection.groupCreate(g_groupName, users)
     //console.log('created WA group')
@@ -142,6 +142,7 @@ function sm4_addUserGroups(userId, waGroupId, groupId) {
     });
 }
 
+// for simulation, this won't update cos unique key is (user_id, message_id)
 function sm5_addUserMessages(userId, waGroupId, groupId) {
     //console.log('in addUserMessage', userId, messageId)
     let query
@@ -158,7 +159,7 @@ function sm5_addUserMessages(userId, waGroupId, groupId) {
         }
         //console.log('affected ' + results.affectedRows + ' rows');
         await waConnection.sendMessage(waGroupId, g_message, MessageType.text)
-        console.log('message sent!')
+        console.log('message sent')
     });
 }
 
@@ -346,26 +347,44 @@ function updateMessageStatus(message) {
                 throw error;
             }
             if (results.affectedRows > 0) {
-                console.log('affected ' + results.affectedRows + ' rows');
+                console.log('affected ' + results.affectedRows + ' rows. ', message.type);
             }
         });        
     }
+}
+
+function optoutUser(user) {
+    user = user.replace('@s.whatsapp.net', '').substr(1)
+    console.log("opting out: ", user)
+    const query = `update users set optout_time = now() where normalized_cell = "${user}"`
+    sqlConnection.query(query, function(error, results, fields) {
+        if (error) {
+            cleanupSendMessage()
+            throw error;
+        }
+        console.log('affected ' + results.affectedRows + ' rows');
+    });
 }
 
 function listen() {
     waConnection.on('message-status-update', (message) => {
         //console.log ('from: ', message.from)
         //console.log ('to: ', message.to, message.ids)
-        console.log ('type: ', message.type, message.participant)
+        //console.log ('type: ', message.type, message.participant)
         updateMessageStatus(message)
     })
 
     // no way to differentiate between user exiting themselves and admin removing them
     // we will assume user quit
-    // TODO: is user quit same as STOP?
+    // TODO: is user quit same as opt out? yes
     waConnection.on ('group-participants-remove', (update) => {
         console.log ('jid: ', update.jid)
         console.log ('participants: ', update.participants)
+
+        // mark participate as opt-out
+        if (update.participants.length > 0) {
+            optoutUser(update.participants[0])
+        }
         // : {jid: string, participants: string[], actor?: string}
     })
 }
