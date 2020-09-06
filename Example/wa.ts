@@ -26,6 +26,7 @@ const g_adminPhones = config.adminPhones
 const g_groupName: string = config.groupName
 const g_cohortId: number = config.cohortId
 const g_processMax: number = config.processMax
+const g_sleepMs : number = config.sleepMs
 
 // simulation only
 const gs_groupId: number = config.groupId
@@ -308,7 +309,7 @@ async function connectToWhatsApp() {
     for (let i = 0; i < g_processMax; i++) {
         console.log('***', i+1, ' of ', g_processMax)
         await sendMessage()
-        await sleep(10000)
+        await sleep(g_sleepMs)
     }
 
 }
@@ -319,7 +320,7 @@ function updateMessageStatus(message) {
     const to = message.to + ''
     let user = message.participant + ''
     user = user.replace('@c.us', '').substr(1)
-    console.log('*** from user: ', user)
+    //console.log('*** from user: ', user)
     if (from.includes('@c') && to.includes('@g')) {
         //console.log('in updateMessageStatus')
         const waGroupId = to
@@ -353,8 +354,8 @@ function updateMessageStatus(message) {
 
 function listen() {
     waConnection.on('message-status-update', (message) => {
-        console.log ('from: ', message.from)
-        console.log ('to: ', message.to, message.ids)
+        //console.log ('from: ', message.from)
+        //console.log ('to: ', message.to, message.ids)
         console.log ('type: ', message.type, message.participant)
         updateMessageStatus(message)
     })
@@ -367,7 +368,6 @@ function listen() {
         console.log ('participants: ', update.participants)
         // : {jid: string, participants: string[], actor?: string}
     })
-
 }
 
 listen()
