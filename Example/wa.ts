@@ -11,8 +11,6 @@ import {
 } from '../src/WAConnection/WAConnection'
 import * as fs from 'fs'
 
-const simulation = true
-
 const mysql = require('mysql');
 const config = require('../config.json')
 let sqlConnection
@@ -21,14 +19,17 @@ const waConnection = new WAConnection()
 // message send
 // settings moved to config.json
 
+const g_simulation: boolean = config.simulation
 const g_message: string = config.message
 const g_adminIds = config.adminIds
 const g_adminPhones = config.adminPhones
 const g_groupName: string = config.groupName
-const gs_groupId: number = config.gs_groupId
-const gs_waGroupId: string = config.gs_waGroupId
-const g_cohortId: number = 2
-const g_processMax: number = 1
+const g_cohortId: number = config.cohortId
+const g_processMax: number = config.processMax
+
+// simulation only
+const gs_groupId: number = config.groupId
+const gs_waGroupId: string = config.waGroupId
 
 let g_messageId: number
 
@@ -63,7 +64,7 @@ async function sendMessage() {
 function sm2_pickUser() {
     //console.log("in pickUser: ")
     let query
-    if (simulation) {
+    if (g_simulation) {
         query = `select id, cell_num from users where is_test = 1 limit 1`
     } else {
         query = `select id, cell_num from users where is_admin = 0 AND optout_time is null AND exists_on_wa = 1 AND id not in (select user_id from user_cohort where cohort_id = ${g_cohortId}) limit 1`
@@ -106,7 +107,7 @@ async function sm3_createGroup(userId, cellNum) {
     
     // instead of creating a new one, first see if one already exists with the desired group name and users
     let group
-    if (simulation) {
+    if (g_simulation) {
         sm4_addUserGroups(userId, gs_waGroupId, gs_groupId)
         return
     }
@@ -290,7 +291,7 @@ async function connectToWhatsApp() {
     const authInfo = waConnection.base64EncodedAuthInfo() // get all the auth info we need to restore this session
     fs.writeFileSync('./auth_info.json', JSON.stringify(authInfo, null, '\t')) // save this info to a file
 
-    if (simulation) {
+    if (g_simulation) {
         console.log("*** Running in SIMULATION mode")        
     } else {
         console.log("*** Running for REAL!")
@@ -307,7 +308,7 @@ async function connectToWhatsApp() {
     for (let i = 0; i < g_processMax; i++) {
         console.log('***', i+1, ' of ', g_processMax)
         await sendMessage()
-        await sleep(1000)
+        await sleep(10000)
     }
 
 }
@@ -320,7 +321,7 @@ function updateMessageStatus(message) {
     user = user.replace('@c.us', '').substr(1)
     console.log('*** from user: ', user)
     if (from.includes('@c') && to.includes('@g')) {
-        console.log('in updateMessageStatus')
+        //console.log('in updateMessageStatus')
         const waGroupId = to
         let field: string
         if (message.type == 3) {
@@ -337,15 +338,16 @@ function updateMessageStatus(message) {
         } else {
             query = `update user_message set ${field} = now() where message_id = ${g_messageId} AND user_id in (select id from users where normalized_cell = "${user}")`
         }    
-        console.log(query)
+        //console.log(query)
         sqlConnection.query(query, function(error, results, fields) {
             if (error) {
                 cleanupSendMessage()
                 throw error;
             }
-            console.log('affected ' + results.affectedRows + ' rows');
-        });
-        
+            if (results.affectedRows > 0) {
+                console.log('affected ' + results.affectedRows + ' rows');
+            }
+        });        
     }
 }
 
