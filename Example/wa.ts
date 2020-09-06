@@ -113,7 +113,12 @@ async function sm3_createGroup(userId, cellNum) {
     //     return
     // }
     //console.log('creating WA group')
-    group = await waConnection.groupCreate(g_groupName, users)
+    try {
+        group = await waConnection.groupCreate(g_groupName, users)
+    } catch (err) {        
+        console.log("FATAL: ", err)
+        process.exit()
+    }
     //console.log('created WA group')
     const query = "insert ignore into `groups` (name, wa_id) values (?, ?)"
     sqlConnection.query(query, [g_groupName, group.gid], function(error, results, fields) {
